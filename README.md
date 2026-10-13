@@ -6,6 +6,85 @@
 
 阶段 0 是 `probe_video()`：逐路解码，每路只解一次。下面七个检测都在这次解码的结果上跑。
 
+## 真实使用流程（四步）
+
+生产里接入一个新数据集按下面做。例子是 `interndata-a1`。示例里的绝对路径是服务器上的位置，同时给出通用形式，换数据集时替换即可。正式筛选的每一步做完都停下来人工审查，确认之后再进行下一步。
+
+### 准备
+
+**1. 复制一份通用流水线到本数据集目录。之后只改这份本地副本。**
+
+示例：从 `/home/ma-user/work/wx1513998/QI_1.3/check_pipeline` 复制到 `/home/ma-user/work/wx1513998/QI_1.3/Intrendata-A1/check_interndata`。
+
+通用形式：从 `<工作区>/check_pipeline` 复制到 `<工作区>/<数据集目录>/check_<数据集短名>`。
+
+每个新数据集一份本地副本。包名可以随目录改，例如 `check_interndata`。通用 `check_pipeline` 保持不动。后面的 `python -m` 里，通用源用 `check_pipeline`，本地副本换成对应包名。
+
+**2. 生成本数据集专用的 `stage0_survey.md`。**
+
+用 `prompts/` 下的提示词，按 `adapt_new_dataset.md` 去改写通用模板 [prompts/stage0_survey.md](prompts/stage0_survey.md)，得到适用于本数据集的 `stage0_survey.md`。prompt 就是 `adapt_new_dataset.md` 的内容。
+
+若仓库尚未收录 `prompts/adapt_new_dataset.md`，需自行放入。当前 `prompts/` 里只有通用的 `stage0_survey.md`。
+
+### 正式筛选
+
+每个步骤之间都要停下人工审查。
+
+**步骤 1.** 把本数据集的 `prompts/stage0_survey.md` 作为 prompt 发给模型，产出 `dataset_profile.json`。字段见 [dataset_profile.md](dataset_profile.md)。
+
+**步骤 2.** 人工审查这份 profile。
+
+**步骤 3.** 等步骤 2 确认审核之后，再跑分位数 / 量程扫描。
+
+跑法：24 并行，不写 log，显示剩余时间。每个维度的 `q1`、`q99`、`range` 直接贴成 Markdown 表格放进回答，不要只留在终端输出里让人点开看。表太大就按维度拆成多张小表，每张约 14 行（子集 × 几列）。`14` 是 `interndata-a1` 的子集数，换数据集用实际子集数。所有数值都要能直接看到，不用展开任何折叠块。
+
+合理性验证：
+
+- `q1 < q99`
+- `range` 在物理量级内：关节约 `0.01~4` rad，夹爪约 `0.05~1.2`
+- 阈值约 `0.001~0.1`
+- `min` 出现 `-π` 时标 wrap-around 警告
+
+有异常的逐行列出。无异常则明确写通过。
+
+仓库里对应的工具是 [tools/scan_percentiles.py](tools/scan_percentiles.py)。当前脚本按单进程扫描，命令行没有「24 并行 / 不写 log / 剩余时间」这几项开关；那三项是这一步的执行和回报要求。
+
+```bash
+python -m check_pipeline.tools.scan_percentiles \
+    --root /path/to/dataset \
+    --columns action observation.state \
+    --out scan.json
+```
+
+本地副本把包名换掉，例如 `python -m check_interndata.tools.scan_percentiles`，参数相同。
+
+**步骤 4：冒烟测试。** 每个子集取前 2 条 episode。
+
+进度约定按 24 workers 并行。每跑完一个子集立刻打印一行，格式如下（`14` 仍是 `interndata-a1` 的子集数，换成实际子集数）：
+
+```text
+[i/14] ✓ 子集名 耗时~s 剩余~s
+```
+
+命令示例保留 `--workers 1`。冒烟可以用 `--workers 1`，全量再开高并行（进度约定按 24 workers）。
+
+```bash
+python -m check_interndata.run_dataset \
+    --root <obs路径> \
+    --profile profiles/profile_<子集名>.json \
+    --out qc_out/<子集名> \
+    --limit 2 \
+    --workers 1
+```
+
+全部跑完后，在回答里贴汇总表和命中详情：
+
+1. 汇总表：每个子集一行（总数、通过、`drop_episode`、`drop_frames`、`failed`、七个检测各自命中数）。七个检测见下一节。
+2. 命中详情：哪条 episode 被哪个检测、以什么规则命中。
+3. 数据源路径和结果存放路径。
+4. 耗时分析：视频读取、parquet 读取、检测计算各占多少。
+5. 给出全量并行检测的命令行。
+
 ## 七个检测
 
 | # | 阶段 | 检测 | 级别 | 看什么 | 触发后 |
@@ -76,6 +155,8 @@ export PYTHONPATH="$(pwd)${PYTHONPATH:+:$PYTHONPATH}"
 入口是 `python -m check_pipeline.run_dataset`。相对导入依赖包名 `check_pipeline`。
 
 ## 快速开始
+
+接入新数据集时，先按上文「真实使用流程（四步）」做准备和逐步人工审查，再用这里的命令。
 
 ### 批量 CLI
 
